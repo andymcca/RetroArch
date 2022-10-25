@@ -283,8 +283,11 @@ static void *sdl_gfx_init(const video_info_t *video,
    if (!video->fullscreen)
       RARCH_LOG("[SDL]: Creating window @ %ux%u\n", video->width, video->height);
 
-   vid->screen = SDL_SetVideoMode(video->width, video->height, 32,
-         SDL_HWSURFACE | SDL_HWACCEL | SDL_DOUBLEBUF | (video->fullscreen ? SDL_FULLSCREEN : 0));
+   //andymcca - hard code screen surface to 16-bit colour, remove incorrect SDL_HWACCEL flag
+   vid->screen = SDL_SetVideoMode(video->width, video->height, 16,
+         SDL_HWSURFACE | SDL_DOUBLEBUF |  (video->fullscreen ? SDL_FULLSCREEN : 0));
+
+   vid->screen->format = SDL_PIXELFORMAT_ARGB1555;
 
    /* We assume that SDL chooses ARGB8888.
     * Assuming this simplifies the driver *a ton*.
@@ -325,9 +328,12 @@ static void *sdl_gfx_init(const video_info_t *video,
          msg_color_g,
          msg_color_b);
 
+
+   // andymcca - unchanged but for info, sets the scaler formats to fill the screen with emulator core output.  Always outputs 32-bit colour image.
    vid->scaler.scaler_type      = video->smooth ? SCALER_TYPE_BILINEAR : SCALER_TYPE_POINT;
    vid->scaler.in_fmt           = video->rgb32 ? SCALER_FMT_ARGB8888 : SCALER_FMT_RGB565;
    vid->scaler.out_fmt          = SCALER_FMT_ARGB8888;
+
 
    vid->menu.scaler             = vid->scaler;
    vid->menu.scaler.scaler_type = SCALER_TYPE_BILINEAR;
@@ -363,6 +369,44 @@ static void sdl_gfx_check_window(sdl_video_t *vid)
    }
 }
 
+// andymcca - add and adapt 16-bit frame blitting function from sdl_dingux_gfx.c for testing
+// andymcca - have commented out padding code so emulator core native frame will be blitted 'as-is'
+//
+static void sdl_blit_frame16(sdl_video_t *vid,
+      uint16_t* src, unsigned width, unsigned height,
+      unsigned src_pitch)
+{
+   unsigned dst_pitch = vid->screen->pitch;
+   uint16_t *in_ptr   = src;
+   uint16_t *out_ptr  = (uint16_t*)(vid->screen->pixels);
+
+   /* If source and destination buffers have the
+    * same pitch, perform fast copy of raw pixel data */
+   if (src_pitch == dst_pitch)
+      memcpy(out_ptr, in_ptr, src_pitch * height);
+   else
+   {
+      /* Otherwise copy pixel data line-by-line */
+
+      /* 16 bit - divide pitch by 2 */
+      uint16_t in_stride  = (uint16_t)(src_pitch >> 1);
+      uint16_t out_stride = (uint16_t)(dst_pitch >> 1);
+      size_t y;
+
+      /* If SDL surface has horizontal padding,
+       * shift output image to the right */
+      //out_ptr += vid->frame_padding_x;
+
+      for (y = 0; y < height; y++)
+      {
+         memcpy(out_ptr, in_ptr, width * sizeof(uint16_t));
+         in_ptr  += in_stride;
+         out_ptr += out_stride;
+      }
+   }
+}
+
+
 static bool sdl_gfx_frame(void *data, const void *frame, unsigned width,
       unsigned height, uint64_t frame_count,
       unsigned pitch, const char *msg, video_frame_info_t *video_info)
@@ -376,14 +420,25 @@ static bool sdl_gfx_frame(void *data, const void *frame, unsigned width,
    if (!frame)
       return true;
 
-   title[0] = '\0';
+   //title[0] = '\0';
 
-   video_driver_get_window_title(title, sizeof(title));
+   //video_driver_get_window_title(title, sizeof(title));
 
-   if (SDL_MUSTLOCK(vid->screen))
-      SDL_LockSurface(vid->screen);
+   if (vid->menu.active) {
+      #ifdef HAVE_MENU
+         menu_driver_frame(menu_is_alive, video_info);
+      #endif
+      SDL_BlitSurface(vid->menu.frame, NULL, vid->screen, NULL);
+   } else {
+      if (SDL_MUSTLOCK(vid->screen))
+        SDL_LockSurface(vid->screen);
 
-   video_frame_scale(
+	 // andymcca - Blit frame to SDL surface using modified sdl_dingux function - assumes incoming frame is 16-bit RGB565 
+
+            sdl_blit_frame16(vid, (uint16_t*)frame,
+                  width, height, pitch);
+         
+      /* video_frame_scale(
          &vid->scaler,
          vid->screen->pixels,
          frame,
@@ -393,26 +448,15 @@ static bool sdl_gfx_frame(void *data, const void *frame, unsigned width,
          vid->screen->pitch,
          width,
          height,
-         pitch);
+         pitch); */
 
-#ifdef HAVE_MENU
-   menu_driver_frame(menu_is_alive, video_info);
 
-   if (vid->menu.active)
-      SDL_BlitSurface(vid->menu.frame, NULL, vid->screen, NULL);
-#endif
+    if (SDL_MUSTLOCK(vid->screen))
+       SDL_UnlockSurface(vid->screen);
+  }
 
-   if (msg)
-      sdl_render_msg(vid, vid->screen,
-            msg, vid->screen->w, vid->screen->h, vid->screen->format,
-            video_info->font_msg_pos_x,
-            video_info->font_msg_pos_y);
-
-   if (SDL_MUSTLOCK(vid->screen))
-      SDL_UnlockSurface(vid->screen);
-
-   if (title[0])
-      SDL_WM_SetCaption(title, NULL);
+//   if (title[0])
+//      SDL_WM_SetCaption(title, NULL);
 
    SDL_Flip(vid->screen);
 
@@ -472,8 +516,10 @@ static void sdl_apply_state_changes(void *data)
 static void sdl_set_texture_frame(void *data, const void *frame, bool rgb32,
       unsigned width, unsigned height, float alpha)
 {
-   enum scaler_pix_fmt format = rgb32
-      ? SCALER_FMT_ARGB8888 : SCALER_FMT_RGBA4444;
+   enum scaler_pix_fmt format = rgb32 ? SCALER_FMT_ABGR8888 : SCALER_FMT_RGBA4444;
+   //enum scaler_pix_fmt format = SCALER_FMT_RGB565;
+
+
    sdl_video_t           *vid = (sdl_video_t*)data;
 
    video_frame_scale(
@@ -487,6 +533,7 @@ static void sdl_set_texture_frame(void *data, const void *frame, bool rgb32,
          width,
          height,
          width * (rgb32 ? sizeof(uint32_t) : sizeof(uint16_t))
+	 //width * sizeof(uint16_t)
          );
 
    SDL_SetAlpha(vid->menu.frame, SDL_SRCALPHA, 255.0 * alpha);
@@ -547,11 +594,7 @@ static const video_poke_interface_t sdl_poke_interface = {
    sdl_grab_mouse_toggle,
    NULL,                         /* get_current_shader */
    NULL,                         /* get_current_software_framebuffer */
-   NULL,                         /* get_hw_render_interface */
-   NULL,                         /* set_hdr_max_nits */
-   NULL,                         /* set_hdr_paper_white_nits */
-   NULL,                         /* set_hdr_contrast */
-   NULL                          /* set_hdr_expand_gamut */
+   NULL                          /* get_hw_render_interface */
 };
 
 static void sdl_get_poke_interface(void *data, const video_poke_interface_t **iface)
@@ -570,6 +613,8 @@ static bool sdl_gfx_set_shader(void *data,
 
    return false;
 }
+
+
 
 video_driver_t video_sdl = {
    sdl_gfx_init,
