@@ -1116,9 +1116,9 @@ static bool sdl_rs90_gfx_frame(void *data, const void *frame,
          sdl_rs90_set_output(vid, width, height, vid->rgb32);
 
       /* Must always lock SDL surface before
-       * manipulating raw pixel buffer */
+       * manipulating raw pixel buffer 
       if (SDL_MUSTLOCK(vid->screen))
-         SDL_LockSurface(vid->screen);
+         SDL_LockSurface(vid->screen);*/
 
       if (likely(vid->mode_valid))
       {
